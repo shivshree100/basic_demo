@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Hand-Controlled Particle Morphing</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        video { display: none; } /* Hide the raw webcam feed */
+        #info {
+            position: absolute; top: 10px; left: 10px; color: white;
+            font-family: sans-serif; pointer-events: none;
+            background: rgba(0,0,0,0.5); padding: 10px; border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="info">
+        <h3>Magic Particle System</h3>
+        <p>🖐 <b>Move Hand:</b> Change Color</p>
+        <p>👌 <b>Pinch:</b> Explode/Expand Particles</p>
+        <p>✋ <b>Open Palm:</b> Switch Shape</p>
+        <p>Loading Camera...</p>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script type="x-shader/x-vertex" id="vertexshader">
+        uniform float uTime;
+        uniform float uExpansion;
+        uniform float uMorphFactor;
+        
+        attribute vec3 positionTarget; // The target shape position
+        attribute float size;
+        
+        varying vec3 vColor;
+        uniform vec3 uColor;
+
+        // Simplex noise function for organic movement
+        vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+        vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+        vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+        vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+        float snoise(vec3 v) {
+            const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
+            const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+            vec3 i  = floor(v + dot(v, C.yyy) );
+            vec3 x0 = v - i + dot(i, C.xxx) ;
+            vec3 g = step(x0.yzx, x0.xyz);
+            vec3 l = 1.0 - g;
+            vec3 i1 = min( g.xyz, l.zxy );
+            vec3 i2 = max( g.xyz, l.zxy );
+            vec3 x1 = x0 - i1 + C.xxx;
+            vec3 x2 = x0 - i2 + C.yyy;
+            vec3 x3 = x0 - D.yyy;
+            i = mod289(i);
+            vec4 p = permute( permute( permute(
+                        i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+                    + i.y + vec4(0.0, i1.y, i2.y, 1.0 ))
+                    + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+            float n_ = 0.142857142857;
+            vec3  ns = n_ * D.wyz - D.xzx;
+            vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+            vec4 x_ = floor(j * ns.z);
+            vec4 y_ = floor(j - 7.0 * x_ );
+            vec4 x = x_ *ns.x + ns.yyyy;
+            vec4 y = y_ *ns.x + ns.yyyy;
+            vec4 h = 1.0 - abs(x) - abs(y);
+            vec4 b0 = vec4( x.xy, y.xy );
+            vec4 b1 = vec4( x.zw, y.zw );
+            vec4 s0 = floor(b0)*2.0 + 1.0;
+            vec4 s1 = floor(b1)*2.0 + 1.0;
+            vec4 sh = -step(h, vec4(0.0));
+            vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+            vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+            vec3 p0 = vec3(a0.xy,h.x);
+            vec3 p1 = vec3(a0.zw,h.y);
+            vec3 p2 = vec3(a1.xy,h.z);
+            vec3 p3 = vec3(a1.zw,h.w);
+            vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+            p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+            vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+            m = m * m;
+            return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1),
+                                        dot(p2,x2), dot(p3,x3) ) );
+        }
+
+        void main() {
+            vColor = uColor;
+
+            // 1. Morphing Logic: Mix between current 'position' and 'positionTarget'
+            vec3 mixedPos = mix(position, positionTarget, uMorphFactor);
+
+            // 2. Noise & Expansion Logic
+            // Add noise based on time and position
+            float noiseVal = snoise(mixedPos * 0.5 + uTime * 0.5);
+            
+            // Expand outward based on pinch gesture
+            vec3 explosionDir = normalize(mixedPos) * uExpansion * 5.0;
+            
+            vec3 finalPos = mixedPos + (normal * noiseVal * 0.2) + explosionDir;
+
+            vec4 mvPosition = modelViewMatrix * vec4(finalPos, 1.0);
+            gl_PointSize = size * (300.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+
+    <script type="x-shader/x-fragment" id="fragmentshader">
+        uniform sampler2D pointTexture;
+        varying vec3 vColor;
+
+        void main() {
+            gl_FragColor = vec4(vColor, 1.0);
+            
+            // Circular particle shape
+            vec2 coord = gl_PointCoord - vec2(0.5);
+            if(length(coord) > 0.5) discard;
+            
+            // Simple glow
+            float strength = 1.0 - (length(coord) * 2.0);
+            gl_FragColor.a = strength;
+        }
+    </script>
+
+    <script>
+        // --- CONFIGURATION ---
+        const PARTICLE_COUNT = 15000;
+        const PARTICLE_SIZE = 0.05;
+        
+        let scene, camera, renderer, material, points;
+        let geometry;
+        let positionsOriginal, positionsTarget; // Buffers
+        
+        // State
+        let currentShapeIndex = 0;
+        let isPinching = false;
+        let pinchDistance = 0;
+        let handX = 0, handY = 0;
+        let lastGestureTime = 0;
+
+        // --- INIT THREE.JS ---
+        function initThree() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 5;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            // Create Geometry
+            geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(PARTICLE_COUNT * 3);
+            const targets = new Float32Array(PARTICLE_COUNT * 3);
+            const sizes = new Float32Array(PARTICLE_COUNT);
+
+            // Initialize as Sphere
+            const sphere = getSpherePositions();
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                positions[i * 3] = sphere[i * 3];
+                positions[i * 3 + 1] = sphere[i * 3 + 1];
+                positions[i * 3 + 2] = sphere[i * 3 + 2];
+                
+                targets[i * 3] = sphere[i * 3]; // Initial target is same
+                
+                sizes[i] = Math.random() * PARTICLE_SIZE;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('positionTarget', new THREE.BufferAttribute(targets, 3));
+            geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+            // Shader Material
+            material = new THREE.ShaderMaterial({
+                uniforms: {
+                    uTime: { value: 0 },
+                    uExpansion: { value: 0 },
+                    uMorphFactor: { value: 0 }, // 0 to 1 transition
+                    uColor: { value: new THREE.Color(0xff6600) }
+                },
+                vertexShader: document.getElementById('vertexshader').textContent,
+                fragmentShader: document.getElementById('fragmentshader').textContent,
+                transparent: true,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending
+            });
+
+            points = new THREE.Points(geometry, material);
+            scene.add(points);
+        }
+
+        // --- SHAPE GENERATORS ---
+        function getSpherePositions() {
+            const arr = new Float32Array(PARTICLE_COUNT * 3);
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const r = 2;
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos((Math.random() * 2) - 1);
+                
+                arr[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+                arr[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+                arr[i * 3 + 2] = r * Math.cos(phi);
+            }
+            return arr;
+        }
+
+        function getHeartPositions() {
+            const arr = new Float32Array(PARTICLE_COUNT * 3);
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                // Heart formula
+                let x = (Math.random() - 0.5) * 4;
+                let z = (Math.random() - 0.5) * 4;
+                let y = (Math.random() - 0.5) * 4;
+                
+                // Rejection sampling for better distribution
+                let valid = false;
+                while(!valid) {
+                    const u = Math.random() * Math.PI * 2;
+                    const v = Math.random() * Math.PI;
+                    // Simple parametric heart approximation
+                    const t = Math.random() * Math.PI * 2;
+                    // x = 16sin^3(t)
+                    // y = 13cos(t) - 5cos(2t) - 2cos(3t) - cos(4t)
+                    x = 16 * Math.pow(Math.sin(t), 3);
+                    y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+                    z = (Math.random() - 0.5) * 10;
+                    
+                    // Scale down
+                    arr[i * 3] = x * 0.1;
+                    arr[i * 3 + 1] = y * 0.1;
+                    arr[i * 3 + 2] = z * 0.1;
+                    valid = true; 
+                }
+            }
+            return arr;
+        }
+
+        function getCubePositions() {
+            const arr = new Float32Array(PARTICLE_COUNT * 3);
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                arr[i * 3] = (Math.random() - 0.5) * 3;
+                arr[i * 3 + 1] = (Math.random() - 0.5) * 3;
+                arr[i * 3 + 2] = (Math.random() - 0.5) * 3;
+            }
+            return arr;
+        }
+
+        const shapes = [getSpherePositions, getHeartPositions, getCubePositions];
+
+        function triggerMorph() {
+            // Update current positions to match the visual state
+            // (In a real production app we would swap buffers, here we just snap)
+            const currentPos = geometry.attributes.position.array;
+            const targetPos = geometry.attributes.positionTarget.array;
+            
+            // If uMorphFactor is 1, current visual is target.
+            // If uMorphFactor is 0, current visual is position.
+            // For simplicity in this demo, we assume morph finished (factor=1)
+            // Copy target into current
+            for(let i=0; i<currentPos.length; i++) {
+                currentPos[i] = targetPos[i];
+            }
+            geometry.attributes.position.needsUpdate = true;
+
+            // Generate new target
+            currentShapeIndex = (currentShapeIndex + 1) % shapes.length;
+            const newTarget = shapes[currentShapeIndex]();
+            
+            for(let i=0; i<targetPos.length; i++) {
+                targetPos[i] = newTarget[i];
+            }
+            geometry.attributes.positionTarget.needsUpdate = true;
+
+            // Animate morph factor
+            let progress = 0;
+            const interval = setInterval(() => {
+                progress += 0.02;
+                if(progress >= 1) {
+                    progress = 1;
+                    clearInterval(interval);
+                }
+                material.uniforms.uMorphFactor.value = progress;
+            }, 16);
+        }
+
+        // --- MEDIAPIPE HANDS ---
+        const videoElement = document.createElement('video');
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+        
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 1280,
+            height: 720
+        });
+        cameraUtils.start();
+
+        function onResults(results) {
+            document.getElementById('info').innerHTML = `
+                <h3>Magic Particle System</h3>
+                <p>Status: Tracking Active</p>
+                <p>Hands Detected: ${results.multiHandLandmarks.length}</p>
+            `;
+
+            if (results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                
+                // 1. Get Hand Position (Index finger tip)
+                const indexTip = landmarks[8];
+                const thumbTip = landmarks[4];
+                
+                // Map to -1 to 1 space
+                handX = (indexTip.x - 0.5) * 2;
+                handY = -(indexTip.y - 0.5) * 2; // Invert Y
+
+                // 2. Pinch Detection (Distance between thumb and index)
+                const dx = indexTip.x - thumbTip.x;
+                const dy = indexTip.y - thumbTip.y;
+                const distance = Math.sqrt(dx*dx + dy*dy);
+                
+                if (distance < 0.05) {
+                    // Pinching
+                    material.uniforms.uExpansion.value = THREE.MathUtils.lerp(material.uniforms.uExpansion.value, 1.0, 0.1);
+                } else {
+                    material.uniforms.uExpansion.value = THREE.MathUtils.lerp(material.uniforms.uExpansion.value, 0.0, 0.1);
+                }
+
+                // 3. Open Palm Detection (for switching shapes)
+                // Heuristic: If all fingers are extended (simplified here check index vs wrist)
+                // A robust way requires checking all finger tips vs PIP joints.
+                // Simple trigger: if hand is very open (distance between wrist and middle tip is large)
+                // Better Trigger: Timeout based.
+                
+                const now = Date.now();
+                if (now - lastGestureTime > 2000 && distance > 0.2) { 
+                    // If fingers are wide open (distance large)
+                    triggerMorph();
+                    lastGestureTime = now;
+                }
+
+                // 4. Update Color based on Position
+                const color = new THREE.Color();
+                color.setHSL((handX + 1) / 2, 1.0, 0.5);
+                material.uniforms.uColor.value.lerp(color, 0.1);
+            }
+        }
+
+        // --- ANIMATION LOOP ---
+        const clock = new THREE.Clock();
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+            
+            material.uniforms.uTime.value = time;
+            
+            // Gentle rotation
+            points.rotation.y = time * 0.1;
+            
+            renderer.render(scene, camera);
+        }
+
+        // Handle Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        initThree();
+        animate();
+
+    </script>
+</body>
+</html>
